@@ -1,0 +1,7 @@
+
+reflex==0.8.17
+beautifulsoup4
+requests
+transformers
+sumy
+nltk
