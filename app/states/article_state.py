@@ -26,7 +26,7 @@ class ArticleState(rx.State):
     sort_by: str = "date_desc"
     view_mode: str = "grid"
     show_delete_modal: bool = False
-    article_to_delete: Article | None = None
+    article_id_to_delete: int | None = None
     is_deleting: bool = False
     article_retrying_id: int | None = None
 
@@ -369,26 +369,26 @@ class ArticleState(rx.State):
         self.view_mode = "list" if self.view_mode == "grid" else "grid"
 
     @rx.event
-    def open_delete_modal(self, article: Article):
+    def open_delete_modal(self, article_id: int):
         self.show_delete_modal = True
-        self.article_to_delete = article
+        self.article_id_to_delete = article_id
 
     @rx.event
     def close_delete_modal(self):
         self.show_delete_modal = False
-        self.article_to_delete = None
+        self.article_id_to_delete = None
         self.is_deleting = False
 
     @rx.event
     def confirm_delete(self):
         self.is_deleting = True
         yield
-        if self.article_to_delete is None:
+        if self.article_id_to_delete is None:
             self.is_deleting = False
             yield rx.toast.error("No article selected for deletion.")
             return
         try:
-            article_id = self.article_to_delete["id"]
+            article_id = self.article_id_to_delete
             with rx.session() as session:
                 session.execute(
                     text("DELETE FROM article WHERE id = :id"),

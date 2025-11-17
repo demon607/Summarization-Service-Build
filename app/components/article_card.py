@@ -45,7 +45,7 @@ def card_actions(article: Article) -> rx.Component:
         ),
         rx.el.button(
             rx.icon("trash-2", class_name="h-4 w-4"),
-            on_click=lambda: ArticleState.open_delete_modal(article),
+            on_click=lambda: ArticleState.open_delete_modal(article["id"]),
             class_name="p-2 text-gray-400 hover:text-red-400 hover:bg-red-500/10 rounded-md transition-colors",
         ),
         class_name="flex items-center gap-2",
