@@ -7,6 +7,8 @@ import logging
 from sqlalchemy import text, select, update, bindparam, func
 from app.utils.summarizer import summarize_text_lsa
 from app.utils.text_cleaner import clean_text
+from app.utils.rate_limiter import is_rate_limited
+from app.utils.url_validator import is_safe_url
 import asyncio
 import re
 
@@ -97,24 +99,64 @@ class ArticleState(rx.State):
         self.error_message = ""
         self.is_submitting = True
         yield
-        url = form_data.get("url")
+        url = form_data.get("url", "").strip()
         if not url:
             self.error_message = "URL is required."
             self.is_submitting = False
             yield rx.toast.error("Please enter a URL.")
             return
+        if len(url) > 2048:
+            self.error_message = "URL is too long (max 2048 characters)."
+            self.is_submitting = False
+            yield rx.toast.error(self.error_message)
+            return
+        client_ip = self.router.session.client_ip
+        if is_rate_limited(client_ip):
+            self.error_message = "Rate limit exceeded. Please try again in an hour."
+            self.is_submitting = False
+            yield rx.toast.error(self.error_message)
+            return
+        validation_error = is_safe_url(url)
+        if validation_error:
+            self.error_message = validation_error
+            self.is_submitting = False
+            yield rx.toast.error(validation_error)
+            return
         try:
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                "User-Agent": "Read-it-Later-Summarizer/1.0",
+                "Accept": "text/html, text/plain",
                 "Accept-Language": "en-US,en;q=0.9",
-                "Accept-Encoding": "gzip, deflate, br",
-                "Connection": "keep-alive",
-                "Upgrade-Insecure-Requests": "1",
+                "Accept-Encoding": "gzip, deflate",
             }
-            response = requests.get(url, headers=headers, timeout=15)
-            response.raise_for_status()
-            soup = BeautifulSoup(response.content, "html.parser")
+            with requests.get(
+                url, headers=headers, timeout=15, stream=True, allow_redirects=False
+            ) as response:
+                response.raise_for_status()
+                content_type = response.headers.get("Content-Type", "").lower()
+                if not any((ct in content_type for ct in ["text/html", "text/plain"])):
+                    self.error_message = "Unsupported content type. Only HTML and plain text are supported."
+                    yield rx.toast.error(self.error_message)
+                    self.is_submitting = False
+                    return
+                content_length = response.headers.get("Content-Length")
+                if content_length and int(content_length) > 5 * 1024 * 1024:
+                    self.error_message = "Content is too large (max 5MB)."
+                    yield rx.toast.error(self.error_message)
+                    self.is_submitting = False
+                    return
+                content_chunks = []
+                total_size = 0
+                for chunk in response.iter_content(chunk_size=8192):
+                    total_size += len(chunk)
+                    if total_size > 5 * 1024 * 1024:
+                        self.error_message = "Content is too large (max 5MB)."
+                        yield rx.toast.error(self.error_message)
+                        self.is_submitting = False
+                        return
+                    content_chunks.append(chunk)
+                full_content = b"".join(content_chunks)
+            soup = BeautifulSoup(full_content, "html.parser")
             og_title = soup.find("meta", property="og:title")
             if og_title and og_title.get("content"):
                 title = og_title["content"]
@@ -164,16 +206,15 @@ class ArticleState(rx.State):
             yield rx.toast.error(self.error_message)
         except requests.exceptions.HTTPError as e:
             logging.exception(f"HTTP error for URL {url}: {e}")
-            if e.response.status_code == 403:
-                self.error_message = (
-                    "Access denied. The website is blocking requests from scripts."
-                )
-            elif e.response.status_code == 404:
-                self.error_message = (
-                    "Article not found. Please check if the URL is correct."
-                )
+            status_code = e.response.status_code if e.response else "Unknown"
+            if status_code == 403:
+                self.error_message = "Access to the article was denied by the server."
+            elif status_code == 404:
+                self.error_message = "The requested article could not be found."
             else:
-                self.error_message = f"Failed to fetch article. Server returned status: {e.response.status_code}"
+                self.error_message = (
+                    "Failed to fetch the article due to a server error."
+                )
             yield rx.toast.error(self.error_message)
         except requests.exceptions.RequestException as e:
             logging.exception(f"Error fetching URL {url}: {e}")
